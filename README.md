@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # ServiceNow Knowledge Agent on AWS Bedrock AgentCore
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -344,6 +345,34 @@ docker build -t snow-ka .
 
 The `Dockerfile` already satisfies Runtime requirements (non-root `bedrock_agentcore` user, port `8080`). Set DB/Bedrock env vars on the Runtime; grant network access (security groups / VPC) from the Runtime to RDS/Aurora.
 
+### Option C — Deploy scripts (Windows / macOS / Linux)
+
+`scripts/Publish-ToAgentCore.ps1` (PowerShell) and `scripts/publish-to-agentcore.sh` (bash) automate the upload — direct code deploy by default, ECR build/push in Container mode — including prerequisite checks, AWS identity verification, and a post-deploy smoke test:
+
+```powershell
+# Windows — direct code deploy (no Docker needed):
+.\scripts\Publish-ToAgentCore.ps1
+
+# Windows — build + push the container image to ECR:
+.\scripts\Publish-ToAgentCore.ps1 -Mode Container -EcrRepoName snow-ka -Region us-east-1
+
+# Windows — with an AWS profile and no smoke test:
+.\scripts\Publish-ToAgentCore.ps1 -AwsProfile my-sso-profile -SkipSmokeTest
+```
+
+```bash
+# macOS / Linux — direct code deploy (no Docker needed):
+./scripts/publish-to-agentcore.sh
+
+# macOS / Linux — build + push the container image to ECR:
+./scripts/publish-to-agentcore.sh --mode container --ecr-repo snow-ka --region us-east-1
+
+# macOS / Linux — with an AWS profile and no smoke test:
+./scripts/publish-to-agentcore.sh --profile my-sso-profile --skip-smoke-test
+```
+
+If Windows blocks the script, allow it for the current session only: `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`. Full parameter docs: `Get-Help .\scripts\Publish-ToAgentCore.ps1 -Full` or `./scripts/publish-to-agentcore.sh --help`.
+
 ### Production checklist
 
 - [ ] Embeddings model + dims match ingestion
@@ -505,3 +534,7 @@ pytest tests/ -v               # unit tests (DB mocked)
 ## License
 
 MIT — see `LICENSE` (add one if publishing). Replace this line with your chosen license file.
+=======
+# 018_ForAgentCore
+AWS AgentCore Setup
+>>>>>>> 74982ce68962806af538d025314250a9f2c39111

@@ -19,6 +19,7 @@ Production-ready support agents that answer IT questions **grounded exclusively 
 - [Quickstart (Local)](#quickstart-local)
 - [Local Test UI (no SSO)](#local-test-ui-no-sso)
 - [Configuration](#configuration)
+- [Memory settings](#memory-settings)
 - [Secrets Manager Setup](#secrets-manager-setup)
 - [Usage](#usage)
 - [Agent Tools](#agent-tools)
@@ -311,9 +312,55 @@ Copy `.env.example` to `.env`. On AgentCore, set these as Runtime environment va
 | `STATEMENT_TIMEOUT_MS` | `15000` | Postgres guardrail |
 | `KA_MAX_TOOL_STEPS` | `6` | ReAct loop budget (mapped to graph recursion limit) |
 | `AGENT_MODE` | `full` | Default pipeline mode: `full` \| `triage` \| `knowledge` \| `rca` \| `solution` |
+| `MEMORY_ENABLED` | `true` | Conversation memory on/off (restart to apply) |
+| `MEMORY_MAX_TURNS` | `10` | Keep last N user turns per thread (`0` = unlimited) |
+| `AGENTCORE_MEMORY_ID` | — | Managed Memory service ID (needs service setup below) |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
 
 > Embedding model + dims are a hard contract: query embeddings and stored `embedding vector(N)` must come from the same model, or results are meaningless. `embeddings.py` raises on dim mismatch.
+
+## Memory settings
+
+Two layers — don't confuse them:
+
+| Layer | Scope | Survives restart? | Settings |
+|---|---|---|---|
+| **Conversation memory** (LangGraph `MemorySaver`, `agents/supervisor.py`) | Follow-ups within one `session_id` | **No** — in-process; a cold microVM or redeploy wipes it | `MEMORY_ENABLED`, `MEMORY_MAX_TURNS` |
+| **AgentCore Memory service** (AWS-managed) | Raw session events + extracted long-term knowledge across sessions | **Yes** | Strategies, expiry, namespaces (below) |
+
+### Changing conversation memory
+
+```bash
+MEMORY_ENABLED=false   # stateless: every turn answered independently, no checkpoint growth
+MEMORY_ENABLED=true    # default: same session_id continues the thread
+MEMORY_MAX_TURNS=5     # keep last 5 user turns per thread (older pruned; 0 = unlimited)
+```
+
+Same `session_id` (= LangGraph `thread_id`) continues a conversation; a new one starts fresh. Changes require a **restart locally** (`python main.py`) or a **redeploy** on AgentCore — the graph is compiled once per process. Bounded history keeps prompts small and cheap: each turn re-sends the retained messages to the LLM.
+
+### Setting up the AgentCore Memory service (durable recall)
+
+For memory that survives restarts and distills durable knowledge (facts, preferences, summaries, episodes) across sessions:
+
+1. **Create the memory resource** with the strategies you want:
+   ```bash
+   agentcore add memory --name SupportMemory \
+     --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE --expiry 30
+   agentcore deploy
+   ```
+   | Strategy | Captures | Good for here |
+   |---|---|---|
+   | `SEMANTIC` | Facts, retrievable by semantic search | Recurring fixes, known-error patterns |
+   | `SUMMARIZATION` | Running conversation summaries | Long troubleshooting threads |
+   | `USER_PREFERENCE` | User settings/preferences | Team's preferred escalation paths |
+   | `EPISODIC` | Significant events + reflections | How past outages were resolved |
+   
+   Or via API/console: `aws bedrock-agentcore-control create-memory --name SupportMemory --event-expiry-duration 30` (+ strategies), attach where needed. Each memory surfaces as `MEMORY_<NAME>_ID` — set `AGENTCORE_MEMORY_ID` to that value on the Runtime.
+2. **IAM:** the execution role needs memory data-plane access on the memory ARN (see "IAM Permissions for AgentCore Memory" in the AWS docs — don't reuse the Runtime execution policy blindly; scope to your memory ARN).
+3. **Expiry:** `--expiry 30` = raw events expire after 30 days. shorten for privacy, lengthen for continuity. Change via re-running `agentcore add memory` / update API + `agentcore deploy`.
+4. **Verify:** invoke twice with the same `session_id`, then list long-term records for the actor namespace — note extraction is **async** (typically ~20–40s after the session), so records won't appear instantly.
+
+**Code status (honest):** `AGENTCORE_MEMORY_ID` is read into settings, but recall injection (fetch actor records → prepend to the knowledge step; write session events) is **not implemented yet** — see Roadmap. Setting the ID alone changes nothing today. The integration point is the knowledge node prologue/epilogue in `src/knowledge_agent/agents/knowledge.py`.
 
 ## Secrets Manager Setup
 
@@ -666,7 +713,7 @@ pytest tests/ -v               # unit tests (DB + Bedrock mocked; covers all 4 a
 
 ## Roadmap
 
-- [ ] Session memory (AgentCore Memory) for multi-turn follow-ups
+- [ ] Durable recall: inject AgentCore Memory records into the knowledge step (`AGENTCORE_MEMORY_ID` is read; recall not wired yet)
 - [ ] Feedback loop: mark answers helpful → boost incident ranking
 - [ ] Category auto-faceting + assignment-group routing suggestions
 - [ ] Evaluation harness over labelled Q/A pairs with citation precision

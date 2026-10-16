@@ -313,6 +313,25 @@ All service secrets share one loader (`knowledge_agent/secrets.py`): `load_servi
 
 Rotation works the same as the DB secret: update the value, new sessions/microVMs read fresh; redeploy to force immediate pickup. Never log secret values — our code logs hosts and usernames only.
 
+### AgentCore Memory service (durable recall)
+
+This repo's conversation memory is in-process (`MemorySaver`): same `session_id` continues a thread, but a cold microVM or redeploy wipes it. Tune it with `MEMORY_ENABLED` / `MEMORY_MAX_TURNS` (restart/redeploy to apply). For memory that **survives restarts** and distills cross-session knowledge, use the managed Memory service:
+
+```bash
+agentcore add memory --name SupportMemory \
+  --strategies SEMANTIC,SUMMARIZATION,USER_PREFERENCE --expiry 30
+agentcore deploy
+# or: aws bedrock-agentcore-control create-memory --name SupportMemory \
+#       --event-expiry-duration 30   (+ strategies per API docs)
+```
+
+- **Strategies** pick what gets extracted: `SEMANTIC` (facts), `SUMMARIZATION` (session summaries), `USER_PREFERENCE` (user settings), `EPISODIC` (significant events + reflections). Change them by re-running the command (or the update API) + redeploy.
+- **Expiry** (`--expiry 30`) bounds raw-event retention; long-term records follow strategy consolidation.
+- Each memory surfaces as `MEMORY_<NAME>_ID` — set our `AGENTCORE_MEMORY_ID` to it. The execution role needs memory data-plane access scoped to the memory ARN.
+- **Verify:** same-`session_id` invokes, then list the actor's long-term records. Extraction is async (~20–40s after the session), so don't expect instant records.
+- **Code status:** the ID is read into settings, but recall injection into the knowledge step is not implemented yet (roadmap) — setting the ID alone changes nothing today.
+- **Watch-outs:** records missing right after a session (async lag, not an error); wrong-actor namespaces when `session_id`/actor mapping changes; expiry set so short that raw events vanish before extraction consolidates them.
+
 ---
 
 ## 12. Observability: logs, traces, metrics

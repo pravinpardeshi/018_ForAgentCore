@@ -76,6 +76,14 @@ class Settings:
     max_tool_steps: int = 6
     default_mode: str = "full"
 
+    # Conversation memory (LangGraph checkpointer, in-process).
+    # Same session_id continues the thread; a cold microVM/restart wipes it.
+    # For durable cross-session memory, see the AgentCore Memory service
+    # (AGENTCORE_MEMORY_ID + README "Memory settings").
+    memory_enabled: bool = True
+    memory_max_turns: int = 10  # keep last N user turns per thread; 0 = unlimited
+    agentcore_memory_id: str = ""
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -106,4 +114,7 @@ def load_settings() -> Settings:
         keyword_weight=_get_float("HYBRID_KEYWORD_WEIGHT", 0.3),
         max_tool_steps=_get_int("KA_MAX_TOOL_STEPS", 6),
         default_mode=_get("AGENT_MODE", "full").lower() or "full",
+        memory_enabled=_get_bool("MEMORY_ENABLED", True),
+        memory_max_turns=_get_int("MEMORY_MAX_TURNS", 10),
+        agentcore_memory_id=_get("AGENTCORE_MEMORY_ID", ""),
     )

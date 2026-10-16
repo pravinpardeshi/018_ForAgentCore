@@ -17,6 +17,7 @@ import logging
 import uuid
 
 from langgraph.graph import END, START, StateGraph
+from langchain_core.messages import HumanMessage
 
 from knowledge_agent.state import VALID_MODES, SupportState
 
@@ -35,6 +36,49 @@ def normalise_mode(mode: object) -> str:
         return candidate
     default = load_settings().default_mode
     return default if default in VALID_MODES else "full"
+
+
+def trim_conversation(messages: list, max_turns: int) -> list:
+    """Keep the last `max_turns` user turns. 0/negative = keep everything.
+
+    A turn starts at a human message; a trailing unanswered human message is
+    always kept. Non-human leading messages (e.g. system) are dropped with
+    the trimmed head — the graph re-injects what it needs per turn.
+    """
+    if max_turns <= 0:
+        return list(messages)
+    keep_from = 0
+    seen_human = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            seen_human += 1
+            if seen_human == max_turns:
+                keep_from = i
+                break
+    else:
+        return list(messages)  # fewer turns than the budget
+    return list(messages[keep_from:])
+
+
+def _prune_checkpoint(graph, config: dict, max_turns: int) -> None:
+    """Delete over-budget messages from the thread checkpoint. Never raises."""
+    try:
+        from langchain_core.messages import RemoveMessage
+
+        snapshot = graph.get_state(config)
+        stored = (snapshot.values or {}).get("messages", []) or []
+        if len([m for m in stored if isinstance(m, HumanMessage)]) <= max_turns:
+            return
+        keep = trim_conversation(stored, max_turns)
+        keep_ids = {getattr(m, "id", None) for m in keep}
+        stale = [RemoveMessage(id=m.id) for m in stored
+                 if getattr(m, "id", None) and m.id not in keep_ids]
+        if stale:
+            graph.update_state(config, {"messages": stale})
+            log.info("Pruned %d message(s), kept last %d turn(s)",
+                     len(stale), max_turns)
+    except Exception as e:  # pruning is hygiene — never break an answer
+        log.warning("Checkpoint prune skipped: %s", e)
 
 
 def _entry_route(state: SupportState) -> str:
@@ -171,17 +215,21 @@ def knowledge_entry_node(state: SupportState) -> dict:
 
 
 def build_supervisor_graph():
-    """Create (and cache) the compiled supervisor graph."""
+    """Create (and cache) the compiled supervisor graph.
+
+    `MEMORY_ENABLED=false` compiles without a checkpointer: every turn is
+    stateless (no conversation carry-over, no checkpoint growth). Changing
+    this setting requires a restart/redeploy — the graph is built once.
+    """
     global _graph, _checkpointer
     if _graph is not None:
         return _graph
-
-    from langgraph.checkpoint.memory import MemorySaver
 
     from knowledge_agent.agents.knowledge import knowledge_node
     from knowledge_agent.agents.rca import rca_node
     from knowledge_agent.agents.solution import solution_node
     from knowledge_agent.agents.triage import triage_node
+    from knowledge_agent.config import load_settings
 
     builder = StateGraph(SupportState)
     builder.add_node("triage", triage_node)
@@ -213,7 +261,11 @@ def build_supervisor_graph():
     builder.add_edge("knowledge_entry", "final")
     builder.add_edge("final", END)
 
-    _checkpointer = MemorySaver()
+    _checkpointer = None
+    if load_settings().memory_enabled:
+        from langgraph.checkpoint.memory import MemorySaver
+
+        _checkpointer = MemorySaver()
     _graph = builder.compile(checkpointer=_checkpointer)
     log.info("Support supervisor graph built (triage/knowledge/rca/solution)")
     return _graph
@@ -323,12 +375,15 @@ def run_support(
     # full: run the compiled graph (conversation memory via checkpointer).
     graph = build_supervisor_graph()
     recursion_limit = max(30, settings.max_tool_steps * 4 + 10)
+    cfg = {"configurable": {"thread_id": thread_id},
+           "recursion_limit": recursion_limit}
     result = graph.invoke(
         {"messages": [HumanMessage(content=prompt)],
          "prompt": prompt, "top_k": k, "mode": "full"},
-        config={"configurable": {"thread_id": thread_id},
-                "recursion_limit": recursion_limit},
+        config=cfg,
     )
+    if settings.memory_enabled and settings.memory_max_turns > 0:
+        _prune_checkpoint(graph, cfg, settings.memory_max_turns)
     answer = result.get("final_answer") or ""
     if not answer:  # graph short-circuit safety net
         answer = format_answer({**copy.deepcopy(result), "mode": "full"})

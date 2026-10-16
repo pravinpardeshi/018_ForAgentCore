@@ -60,6 +60,12 @@ class Settings:
     db_use_iam_auth: bool = False
     statement_timeout_ms: int = 15000
 
+    # Service secrets (Secrets Manager ARNs; see secrets.py).
+    # Each is optional; per-service env vars remain as local-dev fallback.
+    app_secret_arn: str = ""
+    snow_secret_arn: str = ""
+    jira_secret_arn: str = ""
+
     # Retrieval
     default_top_k: int = 5
     max_top_k: int = 20
@@ -68,6 +74,7 @@ class Settings:
 
     # Agent
     max_tool_steps: int = 6
+    default_mode: str = "full"
 
 
 def load_settings() -> Settings:
@@ -90,9 +97,13 @@ def load_settings() -> Settings:
         db_secret_arn=_get("DB_SECRET_ARN", ""),
         db_use_iam_auth=_get_bool("DB_USE_IAM_AUTH", False),
         statement_timeout_ms=_get_int("STATEMENT_TIMEOUT_MS", 15000),
+        app_secret_arn=_get("APP_SECRET_ARN", ""),
+        snow_secret_arn=_get("SNOW_SECRET_ARN", ""),
+        jira_secret_arn=_get("JIRA_SECRET_ARN", ""),
         default_top_k=_get_int("DEFAULT_TOP_K", 5),
         max_top_k=_get_int("MAX_TOP_K", 20),
         min_similarity=_get_float("MIN_SIMILARITY", 0.0),
         keyword_weight=_get_float("HYBRID_KEYWORD_WEIGHT", 0.3),
         max_tool_steps=_get_int("KA_MAX_TOOL_STEPS", 6),
+        default_mode=_get("AGENT_MODE", "full").lower() or "full",
     )

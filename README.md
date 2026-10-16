@@ -1,14 +1,13 @@
-<<<<<<< HEAD
-# ServiceNow Knowledge Agent on AWS Bedrock AgentCore
+# ServiceNow Support Agents on AWS Bedrock AgentCore
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![AWS](https://img.shields.io/badge/AWS-Bedrock_AgentCore-orange)
 ![Database](https://img.shields.io/badge/PostgreSQL-pgvector-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-A production-ready Knowledge Agent that answers IT support questions **grounded exclusively in closed ServiceNow incidents** stored in PostgreSQL + pgvector, deployed as a serverless agent on **AWS Bedrock AgentCore Runtime**.
+Production-ready support agents that answer IT questions **grounded exclusively in closed ServiceNow incidents** stored in PostgreSQL + pgvector, deployed as a serverless multi-agent system on **AWS Bedrock AgentCore Runtime**. Four specialists share one LangGraph supervisor pipeline: **Triage** (classify/route), **Knowledge** (retrieve), **Root Cause Analysis** (diagnose), **Solution Recommender** (fix steps).
 
-> **Scope note:** a separate pipeline owns ingestion into PostgreSQL. This repo is the **query-side agent**: retrieval tools, Strands agent, AgentCore entrypoint, and deployment assets.
+> **Scope note:** a separate pipeline owns ingestion into PostgreSQL. This repo is the **query-side agents**: retrieval tools, LangGraph agents, AgentCore entrypoint, and deployment assets.
 
 ## Table of Contents
 
@@ -25,6 +24,7 @@ A production-ready Knowledge Agent that answers IT support questions **grounded 
 - [Agent Tools](#agent-tools)
 - [Database Schema](#database-schema)
 - [Deploy to AWS Bedrock AgentCore](#deploy-to-aws-bedrock-agentcore)
+- [AgentCore Setup Guide](docs/agentcore-setup-guide.md)
 - [External Access via Entra ID SSO](#external-access-via-entra-id-sso)
 - [Testing](#testing)
 - [Security Notes](#security-notes)
@@ -37,28 +37,37 @@ A production-ready Knowledge Agent that answers IT support questions **grounded 
 
 ```text
 User
- │  POST /invocations  {"prompt": "VPN error 809, how was it fixed?", "top_k": 5}
+ │  POST /invocations  {"prompt": "VPN error 809, how was it fixed?", "top_k": 5, "agent": "full"}
  ▼
 AgentCore Runtime (main.py, BedrockAgentCoreApp @app.entrypoint)
- │  Strands Agent (Bedrock Claude, SYSTEM_PROMPT in prompts.py)
- ├─▶ search_closed_incidents(query, top_k, filters)
+ │  LangGraph Supervisor (Bedrock Claude, prompts.py, MemorySaver sessions)
+ │   triage → knowledge → rca → solution → final answer
+ ├─▶ triage: category / priority / assignment_group (+ LLM refine, heuristic fallback)
+ ├─▶ knowledge: search_closed_incidents(query, top_k, filters)
  │     ├─ Bedrock embed query (Titan v2, 1024-d — MUST match ingestion)
  │     └─ PostgreSQL hybrid retrieval: HNSW cosine similarity + tsvector rank
- └─▶ get_incident_details(INC number) → full resolution / root cause / dates
+ ├─▶ get_incident_details(INC number) → full resolution / root cause / dates
+ ├─▶ rca: likely cause + hypotheses, grounded in retrieved incidents
+ └─▶ solution: ranked fix steps with verification + escalation guidance
        │
        ▼  grounded answer with [INCxxxxxxx] citations
 ```
+
+Single-agent runs: pass `"agent": "triage" | "knowledge" | "rca" | "solution"`.
+`rca` runs knowledge → rca, `solution` runs knowledge → rca → solution, so every
+mode stays grounded in retrieved evidence. Omit `agent` (or set `AGENT_MODE`) for the default `full` pipeline.
 
 Key design decisions:
 
 - **Grounded by construction.** The system prompt forces tool-first retrieval and `[INCxxxxxxx]` citations; the agent says "no relevant closed incident found" instead of hallucinating.
 - **Hybrid retrieval.** Vector similarity blended with Postgres full-text rank, plus exact filters on `category` / `assignment_group`.
-- **Warm-start friendly.** Lazy singleton connection pool and cached Bedrock/BedrockModel clients survive microVM reuse.
+- **Warm-start friendly.** Lazy singleton connection pool and cached Bedrock/ChatBedrock clients survive microVM reuse.
 - **Credential-flexible.** Static password, Secrets Manager, or RDS IAM auth — no secrets baked into images.
 
 ## Features
 
-- Strands agent with Bedrock Claude Sonnet, tuned system prompt for support Q&A
+- LangGraph supervisor pipeline with Bedrock Claude Sonnet: Triage → Knowledge → RCA → Solution
+- Four specialists, each runnable standalone via `"agent": "triage" | "knowledge" | "rca" | "solution"` (`full` = whole pipeline)
 - Two focused tools: semantic incident search + full incident detail lookup
 - Hybrid pgvector + `tsvector` ranking with configurable weights and thresholds
 - Three Postgres auth modes: password, Secrets Manager JSON, RDS IAM token
@@ -71,7 +80,7 @@ Key design decisions:
 | Layer | Choice |
 |---|---|
 | Agent runtime | AWS Bedrock AgentCore Runtime (`bedrock-agentcore`) |
-| Agent framework | Strands Agents (`strands-agents`) + BedrockModel |
+| Agent framework | LangGraph (`langgraph`) ReAct agent + ChatBedrock (`langchain-aws`) |
 | LLM | Bedrock Claude (default `us.anthropic.claude-sonnet-4-20250514-v1:0`, configurable) |
 | Embeddings | Bedrock `amazon.titan-embed-text-v2` (1024 dims, configurable) |
 | Vector DB | PostgreSQL 15+ with `pgvector` (+ `pg_trgm`) |
@@ -87,9 +96,17 @@ Key design decisions:
 ├── .env.example                         # all tunable env vars
 ├── Dockerfile / .dockerignore
 ├── src/knowledge_agent/
-│   ├── config.py                        # env-driven Settings
-│   ├── prompts.py                       # grounding system prompt
-│   ├── agent_factory.py                 # lazy Strands Agent builder
+│   ├── config.py                        # env-driven Settings (incl. AGENT_MODE)
+│   ├── prompts.py                       # system + specialist prompts
+│   ├── state.py                         # shared SupportState contract
+│   ├── llm.py                           # cached ChatBedrock + safe invoke helpers
+│   ├── agent_factory.py                 # supervisor builder + backward-compat run_agent()
+│   ├── agents/
+│   │   ├── triage.py                    # classify / priority / routing
+│   │   ├── knowledge.py                 # deterministic retrieval + enrichment
+│   │   ├── rca.py                       # root-cause hypotheses from evidence
+│   │   ├── solution.py                  # ranked fixes + verification/escalation
+│   │   └── supervisor.py                # mode routing + final synthesis
 │   ├── tools/incident_tools.py          # search_closed_incidents, get_incident_details
 │   └── db/
 │       ├── connection.py                # pooled connections + 3 auth modes
@@ -98,8 +115,30 @@ Key design decisions:
 ├── sql/schema.sql                       # table contract + indexes + ka_reader role
 ├── scripts/
 │   ├── verify_db.py                     # live DB + Bedrock check
-│   └── test_local.py                    # offline tool smoke test (no creds)
-└── tests/test_tools.py                  # unit tests (mocked DB)
+│   ├── test_local.py                    # offline tool smoke test (no creds)
+│   ├── publish-to-agentcore.sh          # deploy to AWS (bash)
+│   └── Publish-ToAgentCore.ps1          # deploy to AWS (PowerShell)
+├── docs/
+│   └── agentcore-setup-guide.md         # enable/configure/troubleshoot AgentCore
+├── tests/
+│   ├── test_tools.py                    # unit tests (mocked DB)
+│   └── test_agents.py                   # triage/rca/solution/supervisor tests (offline)
+└── ui/
+    ├── agent-ui/                        # Angular 22 test console (see "Local Test UI" below)
+    │   ├── package.json                 # npm deps + scripts (start/build)
+    │   ├── angular.json                 # Angular workspace config (build/serve targets)
+    │   ├── proxy.conf.json              # dev-server proxy: /api/ask → agent :8080
+    │   ├── tsconfig*.json               # TypeScript config
+    │   └── src/
+    │       ├── index.html               # page shell, hosts <app-root>
+    │       ├── main.ts                  # app bootstrap (start here when reading)
+    │       ├── styles.css               # global styles
+    │       └── app/
+    │           ├── app.component.ts/html/css  # chat UI (logic/template/styling)
+    │           ├── app.config.ts        # wiring (HTTP client)
+    │           └── agent-api.service.ts # sends questions to /api/ask
+    ├── server.py                        # optional static host for ui/dist/ (stdlib only)
+    └── dist/                            # build output (generated, git-ignored)
 ```
 
 ## Prerequisites
@@ -138,41 +177,99 @@ curl -X POST localhost:8080/invocations \
 
 ## Local Test UI (no SSO)
 
-`ui/` is a throwaway chat console for testing the agent from a browser with **no SSO, no build, no npm**. It calls same-origin `/api/ask`, and the bundled stdlib-only proxy (`ui/server.py`) forwards to the agent — so there are no CORS issues and the UI never changes when you later point it at API Gateway.
+The test UI is a chat page you open in your browser to talk to the agents while developing — **no login/SSO, localhost only**. It used to be three plain files (`index.html` + `app.js` + `styles.css` with no tooling); it is now a small **Angular 22** app in `ui/agent-ui/`. It looks and behaves the same, plus an **agent dropdown** so you can run `full`, `triage`, `knowledge`, `rca`, or `solution` directly.
+
+### If you are new to Angular — the 2-minute version
+
+- **Angular** is a framework for building browser UIs out of **components**. A component = a TypeScript class (the logic) + an HTML template (what you see) + a CSS file (how it looks). Our whole chat page is one component: `src/app/app.component.*`.
+- **TypeScript** is JavaScript with types (e.g. `prompt: string`). Your browser can't run it directly, so Angular **compiles** it to plain JavaScript first — that compilation happens automatically when you run the dev server.
+- **`ng serve` (the dev server)** compiles the app in memory and serves it at `http://localhost:4200`, rebuilding instantly whenever you save a file. You never open the `.ts` files in a browser yourself — you always go through this server during development.
+- **The proxy problem it solves:** browsers block a page on `:4200` from calling an API on `:8080` (this is called **CORS**). Instead of fighting that, the dev server **forwards** API calls for you: the app calls same-origin `/api/ask`, and `ng serve` quietly passes it to the agent. The browser never talks to `:8080` directly, so nothing is blocked.
+
+### How the pieces fit together
+
+```text
+Browser (http://localhost:4200, Angular chat page)
+  │  POST /api/ask  {prompt, top_k, session_id, agent}
+  ▼
+ng serve dev proxy (proxy.conf.json)
+  │  rewrites /api/ask → http://localhost:8080/invocations
+  ▼
+Agent (python main.py, :8080)
+  │  supervisor pipeline: triage → knowledge → rca → solution
+  ▼
+JSON answer {result, session_id, triage, incidents, rca, solution}
+  … flows back up the same path and renders as a chat bubble
+```
+
+### Tour of the UI files (read in this order)
+
+| File | What it is, in plain terms |
+|---|---|
+| `ui/agent-ui/src/main.ts` | The ignition key. One line: "start `AppComponent` in the browser." |
+| `ui/agent-ui/src/index.html` | The empty page shell. It just contains an `<app-root>` placeholder where Angular inserts the chat UI. |
+| `ui/agent-ui/src/app/app.component.html` | The visible page: settings bar (agent dropdown, `top_k`, session buttons), the message list, and the composer box. `[(ngModel)]` means "keep this input and the code variable in sync both ways" (two-way binding). `*ngFor` means "repeat this block once per message". `[innerHTML]` inserts the agent's answer including the highlighted `[INCxxxxxxx]` citations. |
+| `ui/agent-ui/src/app/app.component.ts` | The brains of the page. Holds the state (`prompt`, `messages`, `sessionId`, …) and the `send()` method: show your message → show "Thinking…" → call the service → swap in the answer or an error. `escapeHtml` neutralises any HTML in answers before citation spans are added, so a weird incident text can't break the page. |
+| `ui/agent-ui/src/app/agent-api.service.ts` | The messenger. A tiny injectable class whose only job is `POST /api/ask`. The component never touches HTTP directly — it asks this service. |
+| `ui/agent-ui/src/app/app.config.ts` | Wiring: registers Angular's HTTP client so the service can use it. |
+| `ui/agent-ui/src/app/app.component.css` + `src/styles.css` | Page styling (ported from the old `styles.css`, plus chips for triage/incident badges). |
+| `ui/agent-ui/package.json` | The npm manifest: lists the libraries (`@angular/*`, `rxjs`) and the two commands you need — `npm start` (dev server) and `npm run build` (production files). |
+| `ui/agent-ui/angular.json` | Tells the Angular CLI where everything is and how to build/serve it (output goes to `ui/dist/`). You rarely edit this. |
+| `ui/agent-ui/proxy.conf.json` | The dev-server forwarding rule: anything to `/api/ask` goes to `http://localhost:8080/invocations`. This is the only thing connecting the UI to the agent in dev mode. |
+| `ui/agent-ui/tsconfig*.json` | TypeScript compiler settings (strict mode on). Look here only if you get type errors. |
+| `ui/server.py` | Optional plain-Python static host (no npm needed at runtime). Serves the **built** app from `ui/dist/` on `:3000` and still forwards `/api/ask` to the agent. |
+
+### How one question travels (end to end)
+
+1. You type a question, pick e.g. `rca` from the agent dropdown, and press Enter. `onKey()` in `app.component.ts` calls `send()`.
+2. `send()` adds your bubble to `messages`, shows a "Thinking…" bubble, and calls `agent-api.service.ts` → `POST /api/ask {prompt, top_k, session_id, agent}`.
+3. `ng serve` sees `/api/ask`, matches `proxy.conf.json`, and re-sends it to `http://localhost:8080/invocations` (the agent never sees `/api/ask` — the path is rewritten).
+4. `python main.py` runs the supervisor pipeline and returns `{result, session_id, triage, incidents, rca, solution}`.
+5. The component removes "Thinking…", renders `result` (with `[INCxxxxxxx]` citations highlighted), and adds triage/incident chips underneath from the structured fields. `session_id` coming back keeps follow-ups in the same conversation.
 
 ### Prerequisites
 
+- Node 20+ and npm (`node --version`, `npm --version`).
 - Python 3.10+ with `pip install -r requirements.txt` done.
 - `.env` configured (DB + Bedrock regions), AWS credentials available — the UI talks to the **real** agent, which needs both.
 
-### Run it (two terminals, repo root in both)
+### Run it (two terminals)
 
 ```bash
-# Terminal 1 — start the agent (serves :8080)
+# Terminal 1 — start the agent (serves :8080), repo root
 python main.py
 # expect: INFO ... running / startup logs, no traceback
 ```
 
 ```bash
-# Terminal 2 — start the test UI (serves :3000)
-python ui/server.py
-# expect:
-#   Test UI:  http://localhost:3000
-#   Forwarding /api/ask -> http://localhost:8080/invocations ...
+# Terminal 2 — start the Angular UI (serves :4200)
+cd ui/agent-ui
+npm install   # first time only (see note below about install scripts)
+npm start
+# expect: "Application bundle generation complete", then open http://localhost:4200
 ```
 
-Then open **http://localhost:3000** in your browser, type a question (e.g. `VPN error 809 on Windows 11 — how was it fixed before?`), press Enter, and confirm the answer cites `[INCxxxxxxx]`.
+Then open **http://localhost:4200** in your browser, pick an agent (`full`, `triage`, `knowledge`, `rca`, `solution`), type a question (e.g. `VPN error 809 on Windows 11 — how was it fixed before?`), press Enter, and confirm the answer cites `[INCxxxxxxx]`.
 
-### Useful knobs
+> **Note: `npm install` may warn that 4 install scripts were blocked** (`esbuild`, `@parcel/watcher`, `lmdb`, `msgpackr-extract`). These are normal Angular build tools — the bundler binary, file-watcher for auto-reload, and the build cache — and the dev server needs them. Allow them with:
+>
+> ```bash
+> npm install-scripts approve esbuild @parcel/watcher lmdb msgpackr-extract
+> npm rebuild
+> ```
+
+### Serving a production build instead of ng serve
+
+`npm start` is for development (recompiles on every save). For a static snapshot you can host without Node running:
 
 ```bash
-AGENT_URL=http://localhost:8080/invocations \  # where /api/ask forwards (default shown)
-UI_PORT=3000 \                                 # UI port (default 3000)
-AGENT_TIMEOUT_S=180 \                          # max seconds to wait for an answer
-python ui/server.py
+cd ui/agent-ui && npm run build   # emits ui/dist/ (git-ignored)
+python ui/server.py               # hosts ui/dist on http://localhost:3000
 ```
 
-In the page itself: `top_k` sets how many incidents to retrieve (1–20), `session_id` groups follow-ups into one conversation (New session starts a fresh one), Clear wipes the visible chat only.
+`ui/server.py` (stdlib only) hosts the built app and still proxies `/api/ask` → the agent. Useful knobs: `AGENT_URL` (default `http://localhost:8080/invocations`), `UI_PORT` (default `3000`), `AGENT_TIMEOUT_S` (default `180`).
+
+In the page itself: `agent` selects the specialist pipeline, `top_k` sets how many incidents to retrieve (1–20), `session_id` groups follow-ups into one conversation (New session starts a fresh one), Clear wipes the visible chat only. Triage chips and related `[INCxxxxxxx]` chips render under each answer.
 
 ### If something goes wrong
 
@@ -181,7 +278,10 @@ In the page itself: `top_k` sets how many incidents to retrieve (1–20), `sessi
 | UI shows `cannot reach agent … Is python main.py running?` | Terminal 1 isn't up — start `python main.py` first and wait for it to listen on :8080 |
 | `{'error': 'prompt must be a non-empty string'}` | You sent an empty message — type a question first |
 | Agent answers with an AWS/DB error payload | `.env`/credentials or DB connectivity — re-run `python scripts/verify_db.py` |
-| `Address already in use` on :3000 or :8080 | A previous server is still running — stop it (`Ctrl+C`) or set `UI_PORT=3001` |
+| `Address already in use` on :4200, :3000 or :8080 | A previous server is still running — stop it (`Ctrl+C`). For a stuck `:4200`, also check for a lingering `ng serve` process |
+| `npm install` fails to resolve dependencies | Delete `node_modules` + `package-lock.json` inside `ui/agent-ui` and run `npm install` again; needs internet access to the npm registry |
+| `ng serve` error about `buildTarget` or missing builders | Your `@angular/build` install is incomplete — run `npm install` again in `ui/agent-ui` |
+| Page loads but every ask returns `Error: ... 504/proxy error` | The proxy can't reach the agent — is `python main.py` running on :8080? Check `proxy.conf.json` target |
 
 Localhost only — it binds `127.0.0.1`, has no auth and no TLS, so never expose it beyond your machine. Delete or gate it before any shared deployment; real users go through [External Access via Entra ID SSO](#external-access-via-entra-id-sso).
 
@@ -200,13 +300,17 @@ Copy `.env.example` to `.env`. On AgentCore, set these as Runtime environment va
 | `DB_PASSWORD` | — | Direct auth (leave empty if using below) |
 | `DB_SECRET_ARN` | — | Secrets Manager JSON `{username,password,host,port,dbname}` |
 | `DB_USE_IAM_AUTH` | `false` | `true` → RDS IAM token instead of password |
+| `APP_SECRET_ARN` | — | Generic globals JSON, injected into environ (existing vars win) |
+| `SNOW_SECRET_ARN` | — | ServiceNow JSON `{instance_url,username,password}` or `{instance_url,client_id,client_secret}`; else `SNOW_*` env vars |
+| `JIRA_SECRET_ARN` | — | Jira JSON `{base_url,email,api_token}`; else `JIRA_*` env vars |
 | `DB_SSLMODE` | `require` | TLS mode |
 | `DB_POOL_MIN` / `DB_POOL_MAX` | `1` / `5` | Pool sizing for microVM reuse |
 | `DEFAULT_TOP_K` / `MAX_TOP_K` | `5` / `20` | Retrieval limits |
 | `MIN_SIMILARITY` | `0.0` | Drop hits below this semantic score |
 | `HYBRID_KEYWORD_WEIGHT` | `0.3` | Blend: `0` = pure vector, `1` = pure keyword |
 | `STATEMENT_TIMEOUT_MS` | `15000` | Postgres guardrail |
-| `KA_MAX_TOOL_STEPS` | `6` | Reserved agent loop budget |
+| `KA_MAX_TOOL_STEPS` | `6` | ReAct loop budget (mapped to graph recursion limit) |
+| `AGENT_MODE` | `full` | Default pipeline mode: `full` \| `triage` \| `knowledge` \| `rca` \| `solution` |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
 
 > Embedding model + dims are a hard contract: query embeddings and stored `embedding vector(N)` must come from the same model, or results are meaningless. `embeddings.py` raises on dim mismatch.
@@ -277,37 +381,79 @@ Two current-code caveats:
 
 For local dev, a plain `.env` with `DB_PASSWORD` is simplest; only use `DB_SECRET_ARN` locally if your IAM identity has `GetSecretValue` permission.
 
+### 5. Service secrets (ServiceNow, Jira, app globals)
+
+Same pattern, separate secrets — all wired through `src/knowledge_agent/secrets.py` (one fetch per microVM, cached, values never logged):
+
+| Service | Secret JSON shape | Env var for the ARN | Local-dev fallback |
+|---|---|---|---|
+| App globals | `{"ANY_KEY": "..."}` (injected into environ; existing vars win) | `APP_SECRET_ARN` | plain env vars |
+| ServiceNow | `{instance_url, username, password}` or `{instance_url, client_id, client_secret}` | `SNOW_SECRET_ARN` | `SNOW_INSTANCE_URL`, `SNOW_USERNAME`, `SNOW_PASSWORD`, `SNOW_CLIENT_ID`, `SNOW_CLIENT_SECRET` |
+| Jira | `{base_url, email, api_token}` | `JIRA_SECRET_ARN` | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` |
+
+```bash
+aws secretsmanager create-secret --name snow-ka/servicenow \
+  --secret-string '{"instance_url":"https://xyz.service-now.com","username":"svc_ka","password":"..."}' \
+  --region us-east-1
+aws secretsmanager create-secret --name snow-ka/jira \
+  --secret-string '{"base_url":"https://xyz.atlassian.net","email":"bot@xyz.com","api_token":"..."}' \
+  --region us-east-1
+```
+
+Grant the AgentCore **execution role** `secretsmanager:GetSecretValue` on each ARN, set the `*_SECRET_ARN` env vars on the Runtime, and the agent preloads them on cold start (`preload_service_credentials()` in `main.py` — fail-fast instead of failing mid-answer). In code: `get_snow_credentials()` / `get_jira_credentials()` (check `.available` before calling out).
+
 ## Usage
 
 **Request:**
 
 ```json
-{ "prompt": "Outlook keeps disconnecting — what fixed it before?", "top_k": 5 }
+{ "prompt": "Outlook keeps disconnecting — what fixed it before?", "top_k": 5, "agent": "full" }
 ```
+
+`agent` selects the specialist: `full` (default pipeline), `triage`, `knowledge`, `rca`, or `solution`.
 
 **Response:**
 
 ```json
-{ "result": "Summary...\nResolution steps...\nRelated: [INC0012345] ...\nCaveats..." }
+{
+  "result": "Summary...\nResolution steps...\nRelated: [INC0012345] ...\nCaveats...",
+  "session_id": "session-abc123",
+  "agent": "full",
+  "triage": { "category": "Email", "priority": "3", "assignment_group": "Messaging" },
+  "incidents": [ { "incident_number": "INC0012345", "...": "..." } ],
+  "rca": { "primary_cause": "...", "hypotheses": [...] },
+  "solution": { "primary_recommendation": "...", "recommendations": [...] }
+}
 ```
 
 Example invocations:
 
 ```bash
-# Local server
+# Local server — full pipeline (default)
 curl -X POST localhost:8080/invocations \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"SAP basis transport RC=8 — known root causes?"}'
 
+# Triage only
+curl -X POST localhost:8080/invocations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"VPN down for the whole floor","agent":"triage"}'
+
+# Root-cause analysis (retrieves evidence, then diagnoses)
+curl -X POST localhost:8080/invocations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"VPN error 809 on Windows 11","agent":"rca"}'
+
 # Deployed Runtime
 agentcore invoke '{"prompt":"VPN error 809 on Windows 11, how was it fixed before?"}'
+agentcore invoke '{"prompt":"VPN error 809 on Windows 11","agent":"solution"}'
 ```
 
 Behaviour contract: searches closed incidents first, cites every factual claim as `[INCxxxxxxx]`, fetches full details for top hits before answering, and explicitly says when nothing relevant is found (suggesting useful follow-up info like error text, CI, or assignment group).
 
 ## Agent Tools
 
-Tools are defined in `src/knowledge_agent/tools/incident_tools.py` with Strands `@tool`. The LLM sees the docstrings, so keep them precise.
+Tools are defined in `src/knowledge_agent/tools/incident_tools.py` as plain functions wrapped with LangChain `StructuredTool.from_function`. The LLM sees the descriptions, so keep them precise.
 
 | Tool | Signature | When the agent uses it |
 |---|---|---|
@@ -327,6 +473,8 @@ Errors surface as tool payloads (`{..., "error": "..."}`), never as agent crashe
 Changing embedding models? Update `vector(N)` dims in the schema **and** `EMBEDDING_DIMS` together, then re-embed the corpus.
 
 ## Deploy to AWS Bedrock AgentCore
+
+> New to AgentCore, or something broken? Start with the detailed go-to reference: [`docs/agentcore-setup-guide.md`](docs/agentcore-setup-guide.md) — one-time AWS enablement, IAM, model access, networking, observability, and a 26-row troubleshooting bible.
 
 ### Option A — Direct code deploy (recommended)
 
@@ -396,7 +544,7 @@ Backend (API Gateway + Lambda, or any service)
  │  2. Take user identity from validated sub/oid claim (never client input)
  │  3. InvokeAgentRuntime via boto3 (IAM SigV4, backend role)
  ▼
-AgentCore Runtime → Strands agent → grounded answer
+AgentCore Runtime → LangGraph agent → grounded answer
 ```
 
 ### 1. Entra ID app registration (your Entra admin)
@@ -494,7 +642,7 @@ Possible but heavier: create a Runtime version with a **JWT inbound authorizer**
 ```bash
 python scripts/test_local.py   # offline tool smoke test, no creds
 python scripts/verify_db.py    # live: Bedrock embed + one hybrid search
-pytest tests/ -v               # unit tests (DB mocked)
+pytest tests/ -v               # unit tests (DB + Bedrock mocked; covers all 4 agents + supervisor)
 ```
 
 ## Security Notes
@@ -534,7 +682,3 @@ pytest tests/ -v               # unit tests (DB mocked)
 ## License
 
 MIT — see `LICENSE` (add one if publishing). Replace this line with your chosen license file.
-=======
-# 018_ForAgentCore
-AWS AgentCore Setup
->>>>>>> 74982ce68962806af538d025314250a9f2c39111

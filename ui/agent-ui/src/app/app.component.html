@@ -1,0 +1,51 @@
+<header>
+  <h1>ServiceNow Support Agents</h1>
+  <p class="subtitle">
+    Local test console &mdash; <strong>SSO bypassed</strong>. Localhost only, do not expose.
+  </p>
+</header>
+
+<main>
+  <section id="settings">
+    <div class="field">
+      <label for="agent">agent</label>
+      <select id="agent" [(ngModel)]="agent" [disabled]="busy">
+        <option *ngFor="let a of agents" [value]="a">{{ a }}</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="topk">top_k</label>
+      <input id="topk" type="number" min="1" max="20" [(ngModel)]="topK" [disabled]="busy" />
+    </div>
+    <div class="field grow">
+      <label for="session">session_id</label>
+      <input id="session" type="text" [value]="sessionId" readonly />
+    </div>
+    <button type="button" (click)="newSession()" title="Start a new conversation">New session</button>
+    <button type="button" (click)="clear()" title="Clear visible chat (session stays)">Clear</button>
+    <span class="status" [title]="agentTarget">agent: {{ agentTarget }}</span>
+  </section>
+
+  <section id="chat" aria-live="polite">
+    <div *ngFor="let m of messages" class="msg" [class.user]="m.role === 'user'"
+         [class.agent]="m.role === 'agent'" [class.error]="m.error" [class.typing]="m.typing">
+      <span class="role">{{ m.role === 'user' ? 'you' : 'agent' }}</span>
+      <div [innerHTML]="m.html"></div>
+      <div class="meta" *ngIf="m.triage?.category">
+        <span class="chip">{{ m.triage!.category }} · P{{ m.triage!.priority }} · {{ m.triage!.urgency }}</span>
+        <span class="chip ghost" *ngIf="m.triage!.assignment_group">{{ m.triage!.assignment_group }}</span>
+      </div>
+      <div class="meta" *ngIf="m.incidents?.length">
+        <span class="chip cite-chip" *ngFor="let inc of m.incidents">[{{ inc.incident_number }}]</span>
+      </div>
+    </div>
+    <div id="chat-end"></div>
+  </section>
+
+  <section id="composer">
+    <textarea rows="3" [(ngModel)]="prompt" (keydown)="onKey($event)" [disabled]="busy"
+      placeholder="Ask about a past incident, e.g. VPN error 809 on Windows 11 — how was it fixed before?"></textarea>
+    <button type="button" (click)="send()" [disabled]="busy">Send</button>
+  </section>
+  <p class="hint">Enter to send · Shift+Enter for newline. Answers should cite <code>[INCxxxxxxx]</code>.</p>
+</main>

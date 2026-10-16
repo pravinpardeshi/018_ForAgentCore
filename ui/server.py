@@ -1,12 +1,15 @@
-"""Local placeholder test server: serves the static UI and proxies to the agent.
+"""Local test server: hosts the Angular UI and proxies to the agent.
 
-Why a proxy: the UI calls same-origin /api/ask, so there are no CORS issues
-and no SSO. The proxy forwards to the agent (local `python main.py` on :8080
-today, API Gateway/ALB later) — the UI never changes.
+Two ways to run the UI (from repo root):
 
-Run:
-    python ui/server.py            # UI on http://localhost:3000
-    AGENT_URL=http://localhost:8080/invocations UI_PORT=3000 python ui/server.py
+  Dev (recommended):  cd ui/agent-ui && npm install && npm start
+                      # ng serve on http://localhost:4200, /api/ask proxied
+                      # straight to the agent (see agent-ui/proxy.conf.json)
+
+  Static host:        cd ui/agent-ui && npm run build
+                      python ui/server.py   # hosts ui/dist on http://localhost:3000
+
+Either way, first start the agent in another terminal:  python main.py  (:8080)
 
 Stdlib only. Localhost testing, not for production (no auth, no TLS).
 """
@@ -18,9 +21,10 @@ import os
 import urllib.request
 import urllib.error
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from functools import partial
 
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
+DIST_DIR = os.path.join(UI_DIR, "dist", "browser")
+STATIC_DIR = DIST_DIR if os.path.isfile(os.path.join(DIST_DIR, "index.html")) else UI_DIR
 AGENT_URL = os.environ.get("AGENT_URL", "http://localhost:8080/invocations")
 UI_PORT = int(os.environ.get("UI_PORT", "3000"))
 FORWARD_TIMEOUT_S = int(os.environ.get("AGENT_TIMEOUT_S", "180"))
@@ -28,7 +32,7 @@ FORWARD_TIMEOUT_S = int(os.environ.get("AGENT_TIMEOUT_S", "180"))
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=UI_DIR, **kwargs)
+        super().__init__(*args, directory=STATIC_DIR, **kwargs)
 
     def log_message(self, fmt, *args):  # quieter logs
         print("ui:", fmt % args)
@@ -48,6 +52,23 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, {"ok": True})
         if self.path == "/":
             self.path = "/index.html"
+        if STATIC_DIR == UI_DIR and self.path == "/index.html":
+            # Angular app not built yet — point at the dev workflow instead.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(
+                b"UI not built. Run: cd ui/agent-ui && npm install && "
+                b"(npm start  -> http://localhost:4200,  OR  "
+                b"npm run build then re-run this server)"
+            )
+            return
+        if self.path.startswith("/api/"):
+            return self._json(404, {"error": "unknown endpoint (use /api/ask)"})
+        # SPA fallback: unknown paths serve index.html so client routing works.
+        local = os.path.join(STATIC_DIR, self.path.lstrip("/").split("?")[0])
+        if not os.path.isfile(local):
+            self.path = "/index.html"
         return super().do_GET()
 
     def do_POST(self):
@@ -60,7 +81,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             incoming = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:
-            return self._json(400, {"error": "body must be JSON {prompt, top_k?, session_id?}"})
+            return self._json(400, {"error": "body must be JSON {prompt, top_k?, session_id?, agent?}"})
 
         prompt = incoming.get("prompt", "")
         if not isinstance(prompt, str) or not prompt.strip():
@@ -72,6 +93,8 @@ class Handler(SimpleHTTPRequestHandler):
         }
         if isinstance(incoming.get("top_k"), int):
             forward["top_k"] = max(1, min(incoming["top_k"], 20))
+        if isinstance(incoming.get("agent"), str) and incoming["agent"].strip():
+            forward["agent"] = incoming["agent"].strip().lower()
 
         req = urllib.request.Request(
             AGENT_URL,

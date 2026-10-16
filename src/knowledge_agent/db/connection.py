@@ -10,7 +10,6 @@ The pool is a process-global singleton so warm microVMs reuse connections.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 
@@ -32,14 +31,14 @@ def _resolve_credentials(settings):
     )
 
     if settings.db_secret_arn:
-        sm = boto3.client("secretsmanager", region_name=settings.bedrock_region)
-        secret = sm.get_secret_value(SecretId=settings.db_secret_arn)
-        payload = json.loads(secret["SecretString"])
-        host = payload.get("host", host)
+        from knowledge_agent.secrets import load_service_secret
+
+        payload = load_service_secret(settings.db_secret_arn, settings.bedrock_region)
+        host = str(payload.get("host", host))
         port = int(payload.get("port", port))
-        dbname = payload.get("dbname", dbname)
-        user = payload.get("username", user)
-        password = payload.get("password", password or "")
+        dbname = str(payload.get("dbname", dbname))
+        user = str(payload.get("username", user))
+        password = str(payload.get("password", password or ""))
 
     if settings.db_use_iam_auth:
         rds = boto3.client("rds", region_name=settings.bedrock_region)
